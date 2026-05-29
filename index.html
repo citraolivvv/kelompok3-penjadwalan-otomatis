@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eksperimen Penjadwalan Hybrid Greedy-GA | Matematika Terapan</title>
+    <!-- Bootstrap 5 for grid utilities and components -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Google Fonts Outfit & JetBrains Mono loaded in style.css -->
+    <link rel="stylesheet" href="style.css">
+    <!-- Chart.js for real-time visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+<div class="container py-4 py-md-5">
+    <!-- Header Area -->
+    <header class="row mb-4">
+        <div class="col-12 text-center">
+            <h1 class="display-5 title-gradient mb-2">Simulasi Penjadwalan Hybrid Greedy-GA</h1>
+            <p class="text-muted fs-6 mb-3">
+                Implementasi Metode Numerik Terapan & Komputasi Genetik – Kelompok 3 (Matematika Terapan)
+            </p>
+            <div class="badges-row">
+                <span class="badge-custom bg-gradient-blue">Model: Hybrid Greedy-GA vs Pure GA</span>
+                <span class="badge-custom bg-gradient-blue" id="badgeStatus">Idle</span>
+                <span class="badge-custom bg-gradient-blue" style="border-color: rgba(16, 185, 129, 0.3); color: var(--color-success)">Optimasi Multi-Constraint</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content Grid -->
+    <main class="app-grid">
+        
+        <!-- Left Panel: Input & Parameter Controls -->
+        <section class="d-flex flex-column gap-4">
+            
+            <!-- Parameters Setting Card -->
+            <div class="glass-card">
+                <button class="accordion-trigger" id="accordionBtn" type="button">
+                    <h4 class="fw-bold m-0 title-gradient" style="font-size: 1.15rem; display: inline-flex; align-items: center; gap: 8px;">
+                        <span>⚙️</span> Parameter Algoritma (Lanjutan)
+                    </h4>
+                    <span class="accordion-arrow fs-5" id="accordionArrow">▼</span>
+                </button>
+                
+                <div class="accordion-content" id="accordionContent">
+                    <div class="row g-2">
+                        <div class="col-6 form-group">
+                            <label class="form-label" for="inputPopSize">Ukuran Populasi</label>
+                            <input type="number" id="inputPopSize" class="form-control-custom" value="50" min="10" max="500">
+                        </div>
+                        <div class="col-6 form-group">
+                            <label class="form-label" for="inputMaxGen">Maks Generasi</label>
+                            <input type="number" id="inputMaxGen" class="form-control-custom" value="100" min="10" max="1000">
+                        </div>
+                        <div class="col-6 form-group">
+                            <label class="form-label" for="inputCr">Laju Crossover (Cr)</label>
+                            <input type="number" id="inputCr" class="form-control-custom" value="0.8" step="0.1" min="0" max="1">
+                        </div>
+                        <div class="col-6 form-group">
+                            <label class="form-label" for="inputMr">Laju Mutasi (Mr)</label>
+                            <input type="number" id="inputMr" class="form-control-custom" value="0.1" step="0.01" min="0" max="1">
+                        </div>
+                        <div class="col-12 form-group">
+                            <label class="form-label" for="inputGreedyRatio">Rasio Greedy Awal (Hybrid)</label>
+                            <select id="inputGreedyRatio" class="form-control-custom">
+                                <option value="0.0">0% (Pure Genetic Algorithm)</option>
+                                <option value="0.25">25% Hybrid (Suku Cepat)</option>
+                                <option value="0.5" selected>50% Hybrid (Standar Optimal)</option>
+                                <option value="0.75">75% Hybrid (Dominan Heuristik)</option>
+                                <option value="1.0">100% Hybrid (Full Greedy Seed)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Input Dataset Card -->
+            <div class="glass-card">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h4 class="fw-bold m-0 title-gradient" style="font-size: 1.15rem;">✍️ Data Eksperimen</h4>
+                    <div>
+                        <button id="btnPresetMedium" class="btn-quick-fill">Preset M</button>
+                        <button id="btnPresetLarge" class="btn-quick-fill">Preset L</button>
+                    </div>
+                </div>
+
+                <!-- Input Mode Toggle -->
+                <div class="input-mode-toggle">
+                    <button class="active" id="toggleModeVisual" type="button">✍️ Editor Form Visual</button>
+                    <button id="toggleModeRaw" type="button">📝 Teks Mentah</button>
+                </div>
+
+                <!-- 1. Visual Form Mode Container -->
+                <div id="visualInputContainer">
+                    <!-- 1. Classes Section -->
+                    <div class="form-group mb-3">
+                        <label class="form-label d-flex justify-content-between align-items-center">
+                            Daftar Kelas (Mata Kuliah & Dosen)
+                            <span class="text-muted small fw-normal" id="classCounter" style="font-size: 0.75rem;">0 Kelas</span>
+                        </label>
+                        
+                        <!-- Quick Add Class Templates -->
+                        <div class="gui-section-header">⚡ Pilih Kelas Cepat</div>
+                        <div class="template-class-picker" id="templateClassPicker">
+                            <!-- Dynamic class template cards will be inserted here -->
+                        </div>
+
+                        <!-- Active Classes List Editor -->
+                        <div class="gui-section-header">📋 Kelas Terpilih</div>
+                        <div class="class-editor-container" id="visualClassList">
+                            <!-- Dynamic rows will be inserted here -->
+                        </div>
+                        <button class="btn-quick-fill w-100 py-2 border-primary" style="background: rgba(2, 132, 199, 0.04); font-weight:600; margin-left: 0;" id="btnAddClass" type="button">
+                            ➕ Tambah Kelas Kustom
+                        </button>
+                    </div>
+
+                    <!-- 2. Rooms Section -->
+                    <div class="form-group mb-3">
+                        <label class="form-label">Daftar Ruangan</label>
+                        <div class="gui-section-header">⚡ Pilih Ruangan (A - E)</div>
+                        <div class="template-pill-grid" id="roomTemplateGrid">
+                            <!-- Ruang A-E toggles will be inserted here -->
+                        </div>
+                        
+                        <!-- Custom Room Pills container (Hidden by default, used for custom rooms) -->
+                        <div class="pill-container" id="visualRoomContainer" style="margin-top: 8px;">
+                            <!-- Custom room pills -->
+                        </div>
+                    </div>
+
+                    <!-- 3. Timeslots Section -->
+                    <div class="form-group">
+                        <label class="form-label">Slot Waktu Tersedia</label>
+                        <div class="gui-section-header">⚡ Pilih Slot Waktu (08:00 - 17:00)</div>
+                        <div class="template-pill-grid" id="waktuTemplateGrid">
+                            <!-- Time slot toggles will be inserted here -->
+                        </div>
+                        
+                        <!-- Custom Timeslot Pills container -->
+                        <div class="pill-container" id="visualWaktuContainer" style="margin-top: 8px;">
+                            <!-- Custom time pills -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 2. Raw Text Mode Container (Hidden by default) -->
+                <div id="rawInputContainer" style="display: none;">
+                    <div class="form-group">
+                        <label class="form-label" for="inputDosen">Dosen Pengajar</label>
+                        <textarea id="inputDosen" class="form-control-custom" rows="2" placeholder="Dr. Amirhud, Novialdi Ashari..."></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="inputMK">Mata Kuliah (Kelas)</label>
+                        <textarea id="inputMK" class="form-control-custom" rows="2" placeholder="Matematika Terapan, Basis Data..."></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="inputRuang">Daftar Ruangan</label>
+                        <input type="text" id="inputRuang" class="form-control-custom" placeholder="Ruang A, Ruang B, Ruang C, Ruang D, Ruang E">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="inputWaktu">Slot Waktu Tersedia</label>
+                        <textarea id="inputWaktu" class="form-control-custom" rows="2" placeholder="08:00, 09:00, 10:00, ..., 17:00"></textarea>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Execution Buttons -->
+            <div class="d-flex flex-column gap-2">
+                <button id="runBtn" class="btn-gradient-primary">
+                    <span>⚡</span> JALANKAN EKSPERIMEN HYBRID
+                </button>
+                <button id="runCompareBtn" class="btn-outline-custom">
+                    <span>📊</span> BANDINGKAN PERFORMA (GA VS HYBRID)
+                </button>
+                <button id="stopBtn" class="btn-outline-custom border-danger text-danger" style="display: inline-flex;" disabled>
+                    <span>⏹️</span> HENTIKAN SIMULASI
+                </button>
+            </div>
+            
+            <!-- Process Stepper -->
+            <div class="glass-card py-3 px-3">
+                <div class="stepper-container">
+                    <div id="step1" class="step-item">1. Parsing Data</div>
+                    <div id="step2" class="step-item">2. Init Greedy</div>
+                    <div id="step3" class="step-item">3. Evolusi GA</div>
+                    <div id="step4" class="step-item">4. Selesai</div>
+                </div>
+            </div>
+
+        </section>
+
+        <!-- Right Panel: Dynamic Visualization Dashboard -->
+        <section class="d-flex flex-column gap-4">
+            
+            <!-- Real-time Stats Grid Widget -->
+            <div class="stat-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Generasi</div>
+                    <div class="stat-value" id="statGen">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Best Fitness</div>
+                    <div class="stat-value text-info" id="statFitness">0.0000</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Sisa Bentrokan</div>
+                    <div class="stat-value text-danger" id="statConflicts">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Waktu Tempuh</div>
+                    <div class="stat-value text-success" id="statTime">0 ms</div>
+                </div>
+            </div>
+
+            <!-- Main Interactive Tabs View -->
+            <div class="glass-card">
+                <!-- Navigation Headers -->
+                <nav class="tabs-header">
+                    <button class="tab-link active" data-tab="tabDashboard">📈 Analisis & Grafik</button>
+                    <button class="tab-link" data-tab="tabMatrix">📅 Matriks Jadwal Mingguan</button>
+                    <button class="tab-link" data-tab="tabConflicts">⚠️ Penganalisis Bentrokan</button>
+                </nav>
+
+                <!-- Tab 1: Dashboard Chart & System Engine Logs -->
+                <div id="tabDashboard" class="tab-content active">
+                    <div class="mb-4" style="height: 300px; position: relative;">
+                        <canvas id="mainChart"></canvas>
+                    </div>
+                    
+                    <h5 class="fw-bold mb-2 title-gradient" style="font-size: 0.95rem;">Engine simulation Log</h5>
+                    <div class="console-window" id="logWindow">
+                        <div class="console-line system">Sistem siap. Silakan klik "Jalankan Eksperimen Hybrid" atau "Bandingkan Performa" untuk memulai.</div>
+                    </div>
+                </div>
+
+                <!-- Tab 2: Interactive Dynamic Matrix Grid -->
+                <div id="tabMatrix" class="tab-content">
+                    <h5 class="fw-bold mb-2 title-gradient">Tampilan Matriks Jadwal Teroptimasi</h5>
+                    <p class="small text-muted mb-3">Matriks jadwal real-time berdasarkan pemetaan antara <strong>Ruangan (Kolom)</strong> dan <strong>Slot Waktu (Baris)</strong>.</p>
+                    <div id="matrixContainer">
+                        <div class="text-center text-muted py-5">
+                            <span class="fs-1 d-block mb-3">📅</span>
+                            Belum ada eksperimen yang berjalan. Silakan jalankan simulasi terlebih dahulu.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab 3: Constraint Violations & Conflict Analyzer -->
+                <div id="tabConflicts" class="tab-content">
+                    <h5 class="fw-bold mb-2 title-gradient text-danger">Detektor & Penganalisis Konflik Penjadwalan</h5>
+                    <p class="small text-muted mb-3">Daftar pelanggaran aturan (*Hard Constraints*) yang ditemukan pada jadwal terbaik di generasi saat ini.</p>
+                    <div id="conflictList">
+                        <div class="text-center text-muted py-5">
+                            <span class="fs-1 d-block mb-3">🛡️</span>
+                            Mesin analisa siap. Jalankan eksperimen untuk melihat hasil deteksi bentrokan.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Plain Results Table List (Secondary Overview with Sub-Tabs) -->
+            <div class="glass-card">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                    <h4 class="fw-bold m-0 title-gradient" style="font-size: 1.15rem;">📋 Hasil & Penyesuaian Jadwal</h4>
+                    
+                    <!-- Sub Tabs for Results Card -->
+                    <div class="d-flex gap-2">
+                        <button class="btn-quick-fill active" id="btnResTabStatus" onclick="switchResTab('status')" type="button" style="margin-left: 0;">📊 Status & Bentrokan</button>
+                        <button class="btn-quick-fill" id="btnResTabAdjust" onclick="switchResTab('adjust')" type="button" style="margin-left: 0;">🔧 Penyesuaian Sistem</button>
+                    </div>
+                </div>
+
+                <!-- Tab content 1: Status & Conflict Table -->
+                <div id="resTabStatus" class="tab-content-res">
+                    <div class="table-responsive" style="max-height: 350px; overflow-y: auto;">
+                        <table class="table table-hover table-borderless align-middle text-center mb-0" style="font-size: 0.85rem;">
+                            <thead>
+                                <tr style="border-bottom: 2px solid rgba(148, 163, 184, 0.12); color: var(--color-primary)">
+                                    <th class="text-start py-3">Mata Kuliah</th>
+                                    <th class="text-start">Dosen Pengajar</th>
+                                    <th>Ruangan</th>
+                                    <th>Slot Waktu</th>
+                                    <th>Status Bentrokan</th>
+                                </tr>
+                            </thead>
+                            <tbody id="resultBody">
+                                <tr>
+                                    <td colspan="5" class="text-muted py-4">Menunggu proses optimasi algoritma genetika...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Tab content 2: Adjustments Table (Hidden by default) -->
+                <div id="resTabAdjust" class="tab-content-res" style="display: none;">
+                    <div class="table-responsive" style="max-height: 350px; overflow-y: auto;">
+                        <table class="table table-hover table-borderless align-middle text-center mb-0" style="font-size: 0.85rem;">
+                            <thead>
+                                <tr style="border-bottom: 2px solid rgba(148, 163, 184, 0.12); color: var(--color-primary)">
+                                    <th class="text-start py-3">Mata Kuliah</th>
+                                    <th class="text-start">Jadwal Asal (Awal / Bentrok)</th>
+                                    <th class="text-start text-success">Jadwal Perbaikan (Aman)</th>
+                                    <th>Status Perbaikan</th>
+                                </tr>
+                            </thead>
+                            <tbody id="adjustmentBody">
+                                <tr>
+                                    <td colspan="4" class="text-muted py-4">Menunggu sistem menyelesaikan optimasi hingga bebas bentrokan...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+        </section>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="text-center mt-5 text-muted small">
+        <p>© 2026 Tugas Projek Matematika Terapan - Simulasi Optimasi Penjadwalan Hybrid. All rights reserved.</p>
+    </footer>
+</div>
+
+<!-- Main Application Logic Script -->
+<script src="app.js"></script>
+</body>
+</html>
