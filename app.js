@@ -7,21 +7,10 @@ let animationFrameId = null;
 let isRunning = false;
 let chart = null;
 
-// Preset Data
-const presets = {
-    medium: {
-        dosen: "Dr. Amirhud, Novialdi Ashari, Sulis Nuralia, Dr. Hendi, Prof. Budi",
-        mk: "Matematika Terapan, Basis Data, Jaringan Komputer, Aljabar Linear, Kecerdasan Buatan",
-        ruang: "Ruang A, Ruang B, Ruang C, Ruang D, Ruang E",
-        waktu: "08:00, 09:00, 10:00, 11:00, 12:00, 13:00, 14:00, 15:00, 16:00, 17:00"
-    },
-    large: {
-        dosen: "Dr. Amirhud, Novialdi Ashari, Sulis Nuralia, Dr. Hendi, Prof. Budi, Bu Clarissa, Pak David, Bu Esti, Pak Fahri, Bu Grace",
-        mk: "Matematika Terapan, Basis Data, Jaringan Komputer, Aljabar Linear, Kecerdasan Buatan, Kriptografi, Pemrograman Web, Sistem Operasi, Analisis Numerik, Riset Operasi",
-        ruang: "Ruang A, Ruang B, Ruang C, Ruang D, Ruang E",
-        waktu: "08:00, 09:00, 10:00, 11:00, 12:00, 13:00, 14:00, 15:00, 16:00, 17:00"
-    }
-};
+// Render throttle: re-render heavy views every N generations
+const RENDER_EVERY_N_GENS = 5;
+// Soft warning threshold: popSize * maxGen * sessions.length
+const HEAVY_SIM_WARNING = 5000000;
 
 // Template Constants for GUI selection
 const ROOM_TEMPLATES = ["Ruang A", "Ruang B", "Ruang C", "Ruang D", "Ruang E"];
@@ -39,21 +28,98 @@ const CLASS_TEMPLATES = [
     { course: "Riset Operasi", lecturer: "Bu Grace" }
 ];
 
+// Preset Data (built from templates to avoid duplication)
+function buildPreset(templateCount) {
+    const kelas = CLASS_TEMPLATES.slice(0, templateCount);
+    return {
+        dosen: kelas.map(t => t.lecturer).join(", "),
+        mk: kelas.map(t => t.course).join(", "),
+        ruang: ROOM_TEMPLATES.join(", "),
+        waktu: TIME_TEMPLATES.join(", ")
+    };
+}
+const presets = {
+    medium: buildPreset(5),
+    large: buildPreset(10)
+};
+
+// Escape user-controlled text for safe HTML interpolation
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+// Clamp a numeric form value; "0" is valid (unlike || fallback)
+function clampNumber(value, min, max, fallback) {
+    if (value === "" || value === null || value === undefined) return fallback;
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, n));
+}
+
+function readNumber(id, min, max, fallback) {
+    const el = document.getElementById(id);
+    return clampNumber(el ? el.value : null, min, max, fallback);
+}
+
+function parseListFromText(value) {
+    return String(value)
+        .split(/[,\n]/)
+        .map(x => x.trim())
+        .filter(x => x.length > 0);
+}
+
+// Uniform Fisher–Yates shuffle (returns new array)
+function shuffleArray(input) {
+    const arr = [...input];
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = tmp;
+    }
+    return arr;
+}
+
+function cloneGene(gene) {
+    return { sessionId: gene.sessionId, room: gene.room, timeSlot: gene.timeSlot };
+}
+
+function cloneChromosome(chromosome) {
+    return chromosome.map(cloneGene);
+}
+
+function cloneIndividual(ind) {
+    return { chromosome: cloneChromosome(ind.chromosome), evaluation: ind.evaluation };
+}
+
+// Expose handlers on globalThis so browser inline handlers work and Node can load this file
+const globalScope = typeof globalThis !== "undefined" ? globalThis : window;
+
 // Initialize app when DOM is fully loaded
-document.addEventListener("DOMContentLoaded", () => {
-    initChart();
-    initAccordion();
-    setupInputToggles();
-    setupEventListeners();
-    setupRawInputSync();
-    
-    // Start with empty state
-    renderVisualInput();
-    syncStateToRawInputs();
-    writeLog("Sistem siap. Mulailah memilih kelas, ruangan, dan waktu melalui GUI di bawah ini.", "system");
-    
-    initTabs();
-});
+if (typeof document !== "undefined") {
+    document.addEventListener("DOMContentLoaded", () => {
+        initChart();
+        initAccordion();
+        setupInputToggles();
+        setupEventListeners();
+        setupRawInputSync();
+
+        // Start with empty state
+        renderVisualInput();
+        syncStateToRawInputsSilent();
+        writeLog("Sistem siap. Mulailah memilih kelas, ruangan, dan waktu melalui GUI di bawah ini.", "system");
+
+        initTabs();
+
+        const footerYear = document.getElementById("footerYear");
+        if (footerYear) footerYear.innerText = String(new Date().getFullYear());
+    });
+}
 
 // Global state for Visual Editor
 let dataset = {
@@ -67,7 +133,8 @@ function initAccordion() {
     const btn = document.getElementById("accordionBtn");
     const arrow = document.getElementById("accordionArrow");
     const content = document.getElementById("accordionContent");
-    
+    if (!btn || !arrow || !content) return;
+
     btn.addEventListener("click", (e) => {
         e.preventDefault();
         const isShown = content.classList.toggle("show");
@@ -88,13 +155,19 @@ function initTabs() {
     const contents = document.querySelectorAll(".tab-content");
 
     tabs.forEach(tab => {
+        tab.setAttribute("role", "tab");
+        tab.setAttribute("aria-selected", tab.classList.contains("active") ? "true" : "false");
         tab.addEventListener("click", () => {
-            tabs.forEach(t => t.classList.remove("active"));
+            tabs.forEach(t => {
+                t.classList.remove("active");
+                t.setAttribute("aria-selected", "false");
+            });
             contents.forEach(c => c.classList.remove("active"));
 
             tab.classList.add("active");
+            tab.setAttribute("aria-selected", "true");
             const target = document.getElementById(tab.dataset.tab);
-            target.classList.add("active");
+            if (target) target.classList.add("active");
         });
     });
 }
@@ -121,7 +194,7 @@ function setupInputToggles() {
         btnVisual.classList.remove("active");
         containerVisual.style.display = "none";
         containerRaw.style.display = "block";
-        syncStateToRawInputs(); // Synchronize visual state to raw inputs
+        syncStateToRawInputsSilent(); // Synchronize visual state to raw inputs
     });
 }
 
@@ -176,9 +249,9 @@ function renderVisualInput() {
             const row = document.createElement("div");
             row.className = "class-editor-row";
             row.innerHTML = `
-                <input type="text" placeholder="Mata Kuliah (e.g. Basis Data)" value="${cls.course}" oninput="updateClass(${idx}, 'course', this.value)">
-                <input type="text" placeholder="Dosen Pengajar (e.g. Novialdi)" value="${cls.lecturer}" oninput="updateClass(${idx}, 'lecturer', this.value)">
-                <button class="btn-delete-row" onclick="deleteClass(${idx})" title="Hapus Kelas" type="button">
+                <input type="text" placeholder="Mata Kuliah (e.g. Basis Data)" value="${escapeHtml(cls.course)}" oninput="updateClass(${idx}, 'course', this.value)">
+                <input type="text" placeholder="Dosen Pengajar (e.g. Novialdi)" value="${escapeHtml(cls.lecturer)}" oninput="updateClass(${idx}, 'lecturer', this.value)">
+                <button class="btn-delete-row" onclick="deleteClass(${idx})" title="Hapus Kelas" aria-label="Hapus kelas" type="button">
                     🗑️
                 </button>
             `;
@@ -199,8 +272,8 @@ function renderVisualInput() {
             const pill = document.createElement("span");
             pill.className = "pill-tag";
             pill.innerHTML = `
-                ${room}
-                <button class="pill-tag-remove" onclick="deletePill('rooms', ${idxInDataset})" type="button">×</button>
+                ${escapeHtml(room)}
+                <button class="pill-tag-remove" onclick="deletePill('rooms', ${idxInDataset})" type="button" aria-label="Hapus ruang ${escapeHtml(room)}">×</button>
             `;
             roomContainer.appendChild(pill);
         });
@@ -209,9 +282,9 @@ function renderVisualInput() {
     // Add custom room input pill
     roomContainer.innerHTML += `
         <div class="pill-tag-input-wrapper" id="addRoomInputWrapper">
-            <input type="text" class="pill-tag-input" id="addRoomInput" onkeydown="handlePillInput(event, 'rooms')" onblur="hidePillInput('rooms')">
+            <input type="text" class="pill-tag-input" id="addRoomInput" onkeydown="handlePillInput(event, 'rooms')" onfocusout="handlePillFocusOut(event, 'rooms')">
         </div>
-        <button class="pill-tag-add" id="btnAddRoom" onclick="showPillInput('rooms')" type="button">➕ Kustom Ruang</button>
+        <button class="pill-tag-add" id="btnAddRoom" onclick="showPillInput('rooms')" type="button" aria-label="Tambah ruang kustom">➕ Kustom Ruang</button>
     `;
 
     // 6. Render Custom Waktu pill tags
@@ -225,8 +298,8 @@ function renderVisualInput() {
             const pill = document.createElement("span");
             pill.className = "pill-tag";
             pill.innerHTML = `
-                ${time}
-                <button class="pill-tag-remove" onclick="deletePill('timeslots', ${idxInDataset})" type="button">×</button>
+                ${escapeHtml(time)}
+                <button class="pill-tag-remove" onclick="deletePill('timeslots', ${idxInDataset})" type="button" aria-label="Hapus slot waktu ${escapeHtml(time)}">×</button>
             `;
             waktuContainer.appendChild(pill);
         });
@@ -235,9 +308,9 @@ function renderVisualInput() {
     // Add custom waktu input pill
     waktuContainer.innerHTML += `
         <div class="pill-tag-input-wrapper" id="addWaktuInputWrapper">
-            <input type="text" class="pill-tag-input" id="addWaktuInput" onkeydown="handlePillInput(event, 'timeslots')" onblur="hidePillInput('timeslots')">
+            <input type="text" class="pill-tag-input" id="addWaktuInput" onkeydown="handlePillInput(event, 'timeslots')" onfocusout="handlePillFocusOut(event, 'timeslots')">
         </div>
-        <button class="pill-tag-add" id="btnAddWaktu" onclick="showPillInput('timeslots')" type="button">➕ Kustom Waktu</button>
+        <button class="pill-tag-add" id="btnAddWaktu" onclick="showPillInput('timeslots')" type="button" aria-label="Tambah slot waktu kustom">➕ Kustom Waktu</button>
     `;
 }
 
@@ -254,10 +327,10 @@ function renderClassTemplates() {
         item.className = "template-class-item";
         item.innerHTML = `
             <div class="template-class-info">
-                <span class="template-class-title">${tpl.course}</span>
-                <span class="template-class-lecturer">👨‍🏫 ${tpl.lecturer}</span>
+                <span class="template-class-title">${escapeHtml(tpl.course)}</span>
+                <span class="template-class-lecturer">👨‍🏫 ${escapeHtml(tpl.lecturer)}</span>
             </div>
-            <button class="btn-add-template-class ${isAdded ? 'active' : ''}" onclick="toggleTemplateClass('${tpl.course}', '${tpl.lecturer}')" type="button">
+            <button class="btn-add-template-class ${isAdded ? 'active' : ''}" onclick="toggleTemplateClass('${escapeHtml(tpl.course)}', '${escapeHtml(tpl.lecturer)}')" type="button">
                 ${isAdded ? '✓ Terpilih' : '➕ Tambah'}
             </button>
         `;
@@ -265,7 +338,7 @@ function renderClassTemplates() {
     });
 }
 
-window.toggleTemplateClass = function(course, lecturer) {
+globalScope.toggleTemplateClass = function(course, lecturer) {
     const index = dataset.classes.findIndex(c => c.course === course && c.lecturer === lecturer);
     if (index !== -1) {
         dataset.classes.splice(index, 1);
@@ -331,30 +404,30 @@ function toggleTimeTemplate(time) {
 }
 
 // Visual Editor Handlers (Exposed globally for inline onclick/oninput)
-window.updateClass = function(idx, field, val) {
+globalScope.updateClass = function(idx, field, val) {
     dataset.classes[idx][field] = val;
     syncStateToRawInputsSilent();
 };
 
-window.deleteClass = function(idx) {
+globalScope.deleteClass = function(idx) {
     dataset.classes.splice(idx, 1);
     renderVisualInput();
     syncStateToRawInputsSilent();
 };
 
-window.addClass = function() {
+globalScope.addClass = function() {
     dataset.classes.push({ course: "", lecturer: "" });
     renderVisualInput();
     syncStateToRawInputsSilent();
 };
 
-window.deletePill = function(type, idx) {
+globalScope.deletePill = function(type, idx) {
     dataset[type].splice(idx, 1);
     renderVisualInput();
     syncStateToRawInputsSilent();
 };
 
-window.showPillInput = function(type) {
+globalScope.showPillInput = function(type) {
     const wrapperId = type === 'rooms' ? 'addRoomInputWrapper' : 'addWaktuInputWrapper';
     const btnId = type === 'rooms' ? 'btnAddRoom' : 'btnAddWaktu';
     const inputId = type === 'rooms' ? 'addRoomInput' : 'addWaktuInput';
@@ -367,27 +440,40 @@ window.showPillInput = function(type) {
     input.focus();
 };
 
-window.hidePillInput = function(type) {
-    setTimeout(() => {
-        const wrapperId = type === 'rooms' ? 'addRoomInputWrapper' : 'addWaktuInputWrapper';
-        const btnId = type === 'rooms' ? 'btnAddRoom' : 'btnAddWaktu';
-        
-        const wrapper = document.getElementById(wrapperId);
-        if (wrapper) wrapper.style.display = 'none';
-        const btn = document.getElementById(btnId);
-        if (btn) btn.style.display = 'inline-block';
-    }, 200);
+globalScope.hidePillInput = function(type) {
+    const wrapperId = type === 'rooms' ? 'addRoomInputWrapper' : 'addWaktuInputWrapper';
+    const btnId = type === 'rooms' ? 'btnAddRoom' : 'btnAddWaktu';
+
+    const wrapper = document.getElementById(wrapperId);
+    if (wrapper) wrapper.style.display = 'none';
+    const btn = document.getElementById(btnId);
+    if (btn) btn.style.display = 'inline-block';
 };
 
-window.handlePillInput = function(event, type) {
+globalScope.handlePillFocusOut = function(event, type) {
+    const related = event.relatedTarget;
+    if (related) {
+        const wrapperId = type === 'rooms' ? 'addRoomInputWrapper' : 'addWaktuInputWrapper';
+        const wrapper = document.getElementById(wrapperId);
+        if (wrapper && wrapper.contains(related)) return;
+    }
+    globalScope.hidePillInput(type);
+};
+
+globalScope.handlePillInput = function(event, type) {
     if (event.key === 'Enter') {
         const inputVal = event.target.value.trim();
         if (inputVal.length > 0) {
-            dataset[type].push(inputVal);
-            renderVisualInput();
-            syncStateToRawInputsSilent();
+            const exists = dataset[type].some(v => v.toLowerCase() === inputVal.toLowerCase());
+            if (exists) {
+                writeLog(`Nilai duplikat ditolak: "${inputVal}" sudah ada.`, "warning");
+            } else {
+                dataset[type].push(inputVal);
+                renderVisualInput();
+                syncStateToRawInputsSilent();
+            }
         }
-        hidePillInput(type);
+        globalScope.hidePillInput(type);
     }
 };
 
@@ -403,23 +489,12 @@ function syncStateToRawInputsSilent() {
     document.getElementById("inputWaktu").value = dataset.timeslots.join(", ");
 }
 
-function syncStateToRawInputs() {
-    syncStateToRawInputsSilent();
-}
-
 // Sync Raw Textareas back to State Object
 function syncRawInputsToState() {
-    const parseList = (id) => {
-        return document.getElementById(id).value
-            .split(/[,\n]/)
-            .map(x => x.trim())
-            .filter(x => x.length > 0);
-    };
-
-    const dosenList = parseList("inputDosen");
-    const mkList = parseList("inputMK");
-    const ruangList = parseList("inputRuang");
-    const waktuList = parseList("inputWaktu");
+    const dosenList = parseListFromText(document.getElementById("inputDosen").value);
+    const mkList = parseListFromText(document.getElementById("inputMK").value);
+    const ruangList = parseListFromText(document.getElementById("inputRuang").value);
+    const waktuList = parseListFromText(document.getElementById("inputWaktu").value);
 
     // Populate dataset classes
     dataset.classes = mkList.map((course, idx) => {
@@ -436,7 +511,9 @@ function syncRawInputsToState() {
 
 // Initialize Chart.js
 function initChart() {
-    const ctx = document.getElementById("mainChart").getContext("2d");
+    const canvas = document.getElementById("mainChart");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
     
     // Destroy existing chart if any
     if (chart) {
@@ -509,6 +586,7 @@ function initChart() {
 }
 
 // Log writer helper
+const MAX_LOG_LINES = 500;
 function writeLog(msg, type = 'normal') {
     const logWindow = document.getElementById("logWindow");
     if (!logWindow) return;
@@ -516,9 +594,12 @@ function writeLog(msg, type = 'normal') {
     const time = new Date().toLocaleTimeString('id-ID', { hour12: false });
     const line = document.createElement("div");
     line.className = `console-line ${type}`;
-    line.innerHTML = `[${time}] > ${msg}`;
-    
+    line.innerHTML = `[${time}] > ${escapeHtml(msg)}`;
+
     logWindow.appendChild(line);
+    while (logWindow.children.length > MAX_LOG_LINES) {
+        logWindow.removeChild(logWindow.firstChild);
+    }
     logWindow.scrollTop = logWindow.scrollHeight;
 }
 
@@ -542,11 +623,15 @@ function setupEventListeners() {
 // Update simulation control states
 function toggleControlState(running) {
     isRunning = running;
-    document.getElementById("runBtn").disabled = running;
-    document.getElementById("runCompareBtn").disabled = running;
-    document.getElementById("stopBtn").disabled = !running;
+    const runBtn = document.getElementById("runBtn");
+    const compareBtn = document.getElementById("runCompareBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    if (runBtn) runBtn.disabled = running;
+    if (compareBtn) compareBtn.disabled = running;
+    if (stopBtn) stopBtn.disabled = !running;
 
     const statusBadge = document.getElementById("badgeStatus");
+    if (!statusBadge) return;
     if (running) {
         statusBadge.className = "badge-custom bg-gradient-blue text-warning border-warning";
         statusBadge.innerText = "Running";
@@ -580,26 +665,42 @@ function stopSimulation() {
         animationFrameId = null;
     }
     toggleControlState(false);
-    writeLog("Simulasi dihentikan secara manual oleh pengguna.", "error");
+    writeLog("Simulasi dihentikan secara manual oleh pengguna.", "system");
 }
 
 // ========================================================
 // CORE ALGORITHM IMPLEMENTATION
 // ========================================================
 
-// Parse CSV inputs
+// Parse CSV inputs (visual mode reads dataset.classes directly to preserve pairing)
 function parseInputs() {
-    const parseList = (id) => {
-        return document.getElementById(id).value
-            .split(/[,\n]/) // split by comma or newline
-            .map(x => x.trim())
-            .filter(x => x.length > 0);
-    };
+    const containerVisual = document.getElementById("visualInputContainer");
+    const visualActive = containerVisual && containerVisual.style.display !== "none";
 
-    const dosenList = parseList("inputDosen");
-    const mkList = parseList("inputMK");
-    const ruangList = parseList("inputRuang");
-    const waktuList = parseList("inputWaktu");
+    if (visualActive) {
+        const sessions = [];
+        dataset.classes.forEach(c => {
+            const course = (c.course || "").trim();
+            const lecturer = (c.lecturer || "").trim();
+            if (course.length > 0) {
+                sessions.push({ id: sessions.length, course, lecturer });
+            }
+        });
+        const rooms = dataset.rooms.filter(r => (r || "").trim().length > 0);
+        const timeSlots = dataset.timeslots.filter(t => (t || "").trim().length > 0);
+
+        if (sessions.length === 0) throw new Error("Daftar Mata Kuliah tidak boleh kosong.");
+        if (sessions.some(s => s.lecturer.length === 0)) throw new Error("Setiap kelas harus memiliki dosen pengajar.");
+        if (rooms.length === 0) throw new Error("Daftar Ruangan tidak boleh kosong.");
+        if (timeSlots.length === 0) throw new Error("Daftar Slot Waktu tidak boleh kosong.");
+
+        return { sessions, rooms, timeSlots };
+    }
+
+    const dosenList = parseListFromText(document.getElementById("inputDosen").value);
+    const mkList = parseListFromText(document.getElementById("inputMK").value);
+    const ruangList = parseListFromText(document.getElementById("inputRuang").value);
+    const waktuList = parseListFromText(document.getElementById("inputWaktu").value);
 
     if (mkList.length === 0) throw new Error("Daftar Mata Kuliah tidak boleh kosong.");
     if (dosenList.length === 0) throw new Error("Daftar Dosen tidak boleh kosong.");
@@ -632,6 +733,7 @@ function evaluateChromosome(chromosome, sessions) {
         roomConflictingClasses: [],
         lecturerConflictingClasses: []
     }));
+    const flagMap = new Map(geneFlags.map(f => [f.sessionId, f]));
 
     // Group by Room + TimeSlot
     const roomGroups = {};
@@ -654,16 +756,18 @@ function evaluateChromosome(chromosome, sessions) {
     for (const key in roomGroups) {
         const genes = roomGroups[key];
         if (genes.length > 1) {
-            const [room, timeSlot] = key.split('#');
+            const hashIdx = key.indexOf('#');
+            const room = key.slice(0, hashIdx);
+            const timeSlot = key.slice(hashIdx + 1);
             const courseNames = genes.map(g => sessions[g.sessionId].course);
-            
+
             // Mark flags for all genes in this group
             genes.forEach(g => {
-                const idx = geneFlags.findIndex(flag => flag.sessionId === g.sessionId);
-                if (idx !== -1) {
-                    geneFlags[idx].roomConflict = true;
+                const flag = flagMap.get(g.sessionId);
+                if (flag) {
+                    flag.roomConflict = true;
                     // Other classes that this gene is conflicting with
-                    geneFlags[idx].roomConflictingClasses = courseNames.filter(name => name !== sessions[g.sessionId].course);
+                    flag.roomConflictingClasses = courseNames.filter(name => name !== sessions[g.sessionId].course);
                 }
             });
 
@@ -673,7 +777,7 @@ function evaluateChromosome(chromosome, sessions) {
 
             conflictDetails.push({
                 type: 'room',
-                desc: `<strong>Bentrokan Ruangan:</strong> ${genes.length} kelas (<em>${courseNames.join(', ')}</em>) dijadwalkan di ruangan yang sama (<strong>${room}</strong>) pada slot <strong>${timeSlot}</strong>.`
+                desc: `<strong>Bentrokan Ruangan:</strong> ${genes.length} kelas (<em>${escapeHtml(courseNames.join(', '))}</em>) dijadwalkan di ruangan yang sama (<strong>${escapeHtml(room)}</strong>) pada slot <strong>${escapeHtml(timeSlot)}</strong>.`
             });
         }
     }
@@ -682,15 +786,17 @@ function evaluateChromosome(chromosome, sessions) {
     for (const key in lecturerGroups) {
         const genes = lecturerGroups[key];
         if (genes.length > 1) {
-            const [lecturer, timeSlot] = key.split('#');
+            const hashIdx = key.indexOf('#');
+            const lecturer = key.slice(0, hashIdx);
+            const timeSlot = key.slice(hashIdx + 1);
             const courseNames = genes.map(g => sessions[g.sessionId].course);
 
             // Mark flags for all genes in this group
             genes.forEach(g => {
-                const idx = geneFlags.findIndex(flag => flag.sessionId === g.sessionId);
-                if (idx !== -1) {
-                    geneFlags[idx].lecturerConflict = true;
-                    geneFlags[idx].lecturerConflictingClasses = courseNames.filter(name => name !== sessions[g.sessionId].course);
+                const flag = flagMap.get(g.sessionId);
+                if (flag) {
+                    flag.lecturerConflict = true;
+                    flag.lecturerConflictingClasses = courseNames.filter(name => name !== sessions[g.sessionId].course);
                 }
             });
 
@@ -700,7 +806,7 @@ function evaluateChromosome(chromosome, sessions) {
 
             conflictDetails.push({
                 type: 'lecturer',
-                desc: `<strong>Bentrokan Dosen:</strong> <strong>${lecturer}</strong> dijadwalkan mengajar ${genes.length} kelas sekaligus (<em>${courseNames.join(', ')}</em>) pada slot <strong>${timeSlot}</strong>.`
+                desc: `<strong>Bentrokan Dosen:</strong> <strong>${escapeHtml(lecturer)}</strong> dijadwalkan mengajar ${genes.length} kelas sekaligus (<em>${escapeHtml(courseNames.join(', '))}</em>) pada slot <strong>${escapeHtml(timeSlot)}</strong>.`
             });
         }
     }
@@ -733,7 +839,7 @@ function createGreedyChromosome(sessions, rooms, timeSlots) {
     const chromosome = [];
     
     // Shuffle sessions to introduce stochastic diversity (prevents identical greedy clones)
-    const shuffledSessions = [...sessions].sort(() => Math.random() - 0.5);
+    const shuffledSessions = shuffleArray(sessions);
 
     for (const session of shuffledSessions) {
         let bestRoom = rooms[0];
@@ -741,8 +847,8 @@ function createGreedyChromosome(sessions, rooms, timeSlots) {
         let minConflicts = Infinity;
 
         // Shuffle rooms and timeslots selection order
-        const shuffledRooms = [...rooms].sort(() => Math.random() - 0.5);
-        const shuffledTimeSlots = [...timeSlots].sort(() => Math.random() - 0.5);
+        const shuffledRooms = shuffleArray(rooms);
+        const shuffledTimeSlots = shuffleArray(timeSlots);
 
         for (const r of shuffledRooms) {
             for (const t of shuffledTimeSlots) {
@@ -825,15 +931,15 @@ function tournamentSelection(population, tournamentSize = 3) {
         }
     }
     // Return deeply cloned chromosome
-    return JSON.parse(JSON.stringify(best));
+    return cloneIndividual(best);
 }
 
 // Crossover operator: Uniform / Single-Point Crossover
 function crossover(parentA, parentB, crossoverRate = 0.8) {
     if (Math.random() > crossoverRate) {
         return [
-            JSON.parse(JSON.stringify(parentA.chromosome)),
-            JSON.parse(JSON.stringify(parentB.chromosome))
+            cloneChromosome(parentA.chromosome),
+            cloneChromosome(parentB.chromosome)
         ];
     }
 
@@ -857,7 +963,7 @@ function crossover(parentA, parentB, crossoverRate = 0.8) {
 
 // Mutation operator: swaps timeslot or room
 function mutate(chromosome, rooms, timeSlots, mutationRate = 0.1) {
-    const mutated = JSON.parse(JSON.stringify(chromosome));
+    const mutated = cloneChromosome(chromosome);
     
     for (let i = 0; i < mutated.length; i++) {
         if (Math.random() < mutationRate) {
@@ -878,9 +984,9 @@ function evolveGeneration(population, popSize, sessions, rooms, timeSlots, cross
     const nextGeneration = [];
 
     // 1. Elitism: Keep 2 best individuals unchanged
-    nextGeneration.push(JSON.parse(JSON.stringify(population[0])));
+    nextGeneration.push(cloneIndividual(population[0]));
     if (population.length > 1) {
-        nextGeneration.push(JSON.parse(JSON.stringify(population[1])));
+        nextGeneration.push(cloneIndividual(population[1]));
     }
 
     // 2. Replenish rest of population with offspring
@@ -981,7 +1087,7 @@ function renderScheduleMatrix(chromosome, sessions, rooms, timeSlots, geneFlags)
     `;
     
     rooms.forEach(r => {
-        html += `<th>${r}</th>`;
+        html += `<th>${escapeHtml(r)}</th>`;
     });
     
     html += `
@@ -993,7 +1099,7 @@ function renderScheduleMatrix(chromosome, sessions, rooms, timeSlots, geneFlags)
     timeSlots.forEach(t => {
         html += `
             <tr>
-                <td class="time-header">${t}</td>
+                <td class="time-header">${escapeHtml(t)}</td>
         `;
 
         rooms.forEach(r => {
@@ -1023,17 +1129,17 @@ function renderScheduleMatrix(chromosome, sessions, rooms, timeSlots, geneFlags)
                     // Build warning detail HTML tags
                     let warningBadges = "";
                     if (hasRoomConf) {
-                        warningBadges += `<div class="badge-conflict-detail room">🚫 Ruang Bentrok (${c.roomConflictingClasses.join(', ')})</div>`;
+                        warningBadges += `<div class="badge-conflict-detail room">🚫 Ruang Bentrok (${escapeHtml(c.roomConflictingClasses.join(', '))})</div>`;
                     }
                     if (hasLecturerConf) {
-                        warningBadges += `<div class="badge-conflict-detail lecturer">👤 Dosen Bentrok (${c.lecturer})</div>`;
+                        warningBadges += `<div class="badge-conflict-detail lecturer">👤 Dosen Bentrok (${escapeHtml(c.lecturer)})</div>`;
                     }
 
                     html += `
                         <div class="class-badge ${conflictClass}" style="${borderStyle} ${bgStyle}">
-                            <div class="class-title">${c.course}</div>
+                            <div class="class-title">${escapeHtml(c.course)}</div>
                             <div class="class-details">
-                                <span>👨‍🏫 ${c.lecturer}</span>
+                                <span>👨‍🏫 ${escapeHtml(c.lecturer)}</span>
                             </div>
                             ${warningBadges}
                         </div>
@@ -1126,10 +1232,10 @@ function renderResultTable(chromosome, sessions, geneFlags) {
 
         html += `
             <tr style="border-bottom: 1px solid rgba(148, 163, 184, 0.12); ${rowStyle}">
-                <td class="fw-bold text-start text-primary py-3">${session.course}</td>
-                <td class="text-start text-dark">${session.lecturer}</td>
-                <td><span class="badge bg-light text-dark border px-3 py-2">${gene.room}</span></td>
-                <td><span class="badge bg-secondary-subtle text-primary border px-3 py-2 font-monospace fw-bold">${gene.timeSlot}</span></td>
+                <td class="fw-bold text-start text-primary py-3">${escapeHtml(session.course)}</td>
+                <td class="text-start text-dark">${escapeHtml(session.lecturer)}</td>
+                <td><span class="badge bg-light text-dark border px-3 py-2">${escapeHtml(gene.room)}</span></td>
+                <td><span class="badge bg-secondary-subtle text-primary border px-3 py-2 font-monospace fw-bold">${escapeHtml(gene.timeSlot)}</span></td>
                 <td>${statusLabel}</td>
             </tr>
         `;
@@ -1169,6 +1275,7 @@ function renderAdjustmentTable(initialBest, finalBest, sessions) {
     filteredSessions.forEach(session => {
         const initGene = initialBest.chromosome.find(g => g.sessionId === session.id);
         const finalGene = finalBest.chromosome.find(g => g.sessionId === session.id);
+        if (!initGene || !finalGene) return;
 
         const roomChanged = initGene.room !== finalGene.room;
         const timeChanged = initGene.timeSlot !== finalGene.timeSlot;
@@ -1199,14 +1306,14 @@ function renderAdjustmentTable(initialBest, finalBest, sessions) {
 
         html += `
             <tr style="border-bottom: 1px solid rgba(148, 163, 184, 0.12); ${rowStyle}">
-                <td class="fw-bold text-start text-primary py-3">${session.course} <span class="small text-muted" style="font-size:0.75rem; display:block; font-weight:normal;">👨‍🏫 ${session.lecturer}</span></td>
+                <td class="fw-bold text-start text-primary py-3">${escapeHtml(session.course)} <span class="small text-muted" style="font-size:0.75rem; display:block; font-weight:normal;">👨‍🏫 ${escapeHtml(session.lecturer)}</span></td>
                 <td class="text-start text-danger" style="font-size:0.8rem; line-height: 1.5;">
-                    🏢 ${initGene.room}<br>
-                    ⏰ ${initGene.timeSlot}
+                    🏢 ${escapeHtml(initGene.room)}<br>
+                    ⏰ ${escapeHtml(initGene.timeSlot)}
                 </td>
                 <td class="text-start text-success fw-bold" style="font-size:0.8rem; line-height: 1.5;">
-                    🏢 ${finalGene.room}<br>
-                    ⏰ ${finalGene.timeSlot}
+                    🏢 ${escapeHtml(finalGene.room)}<br>
+                    ⏰ ${escapeHtml(finalGene.timeSlot)}
                 </td>
                 <td>${actionLabel}</td>
             </tr>
@@ -1217,7 +1324,7 @@ function renderAdjustmentTable(initialBest, finalBest, sessions) {
 }
 
 // Switch Results Sub-Tabs (Status vs Adjustments)
-window.switchResTab = function(type) {
+globalScope.switchResTab = function(type) {
     const tabStatus = document.getElementById("resTabStatus");
     const tabAdjust = document.getElementById("resTabAdjust");
     const btnStatus = document.getElementById("btnResTabStatus");
@@ -1230,20 +1337,28 @@ window.switchResTab = function(type) {
         tabAdjust.style.display = "none";
         btnStatus.classList.add("active");
         btnAdjust.classList.remove("active");
+        if (btnStatus) btnStatus.setAttribute("aria-selected", "true");
+        if (btnAdjust) btnAdjust.setAttribute("aria-selected", "false");
     } else {
         tabStatus.style.display = "none";
         tabAdjust.style.display = "block";
         btnAdjust.classList.add("active");
         btnStatus.classList.remove("active");
+        if (btnAdjust) btnAdjust.setAttribute("aria-selected", "true");
+        if (btnStatus) btnStatus.setAttribute("aria-selected", "false");
     }
 };
 
 // Update Real-Time Stat cards
 function updateStatsUI(gen, bestFitness, conflicts, executionTime) {
-    document.getElementById("statGen").innerText = gen;
-    document.getElementById("statFitness").innerText = bestFitness.toFixed(4);
-    document.getElementById("statConflicts").innerText = conflicts;
-    document.getElementById("statTime").innerText = `${executionTime} ms`;
+    const set = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.innerText = val;
+    };
+    set("statGen", gen);
+    set("statFitness", bestFitness.toFixed(4));
+    set("statConflicts", conflicts);
+    set("statTime", `${executionTime} ms`);
 }
 
 // ========================================================
@@ -1265,22 +1380,26 @@ async function startSimulate(compareMode = false) {
         parseData = parseInputs();
     } catch (err) {
         writeLog(err.message, "error");
-        alert(err.message);
         return;
     }
 
     const { sessions, rooms, timeSlots } = parseData;
 
-    // Get UI parameters
-    const popSize = parseInt(document.getElementById("inputPopSize").value) || 50;
-    const maxGen = parseInt(document.getElementById("inputMaxGen").value) || 100;
-    const cr = parseFloat(document.getElementById("inputCr").value) || 0.8;
-    const mr = parseFloat(document.getElementById("inputMr").value) || 0.1;
-    const greedyRatio = parseFloat(document.getElementById("inputGreedyRatio").value) || 0.5;
+    // Get UI parameters (Number.isFinite-safe: 0 is a valid value)
+    const popSize = readNumber("inputPopSize", 10, 500, 50);
+    const maxGen = readNumber("inputMaxGen", 10, 1000, 100);
+    const cr = readNumber("inputCr", 0, 1, 0.8);
+    const mr = readNumber("inputMr", 0, 1, 0.1);
+    const greedyRatio = readNumber("inputGreedyRatio", 0, 1, 0.5);
 
     // Log experiment variables
     writeLog(`Dataset valid: ${sessions.length} Kelas, ${rooms.length} Ruangan, ${timeSlots.length} Slot Waktu.`, "success");
     writeLog(`Parameter: PopSize=${popSize}, MaxGen=${maxGen}, Cr=${cr}, Mr=${mr}, GreedyRatio=${greedyRatio}`, "system");
+
+    const evalEstimate = popSize * maxGen * sessions.length;
+    if (evalEstimate > HEAVY_SIM_WARNING) {
+        writeLog(`Peringatan: estimasi ${evalEstimate.toLocaleString('id-ID')} evaluasi gen — simulasi mungkin berat/lambat.`, "warning");
+    }
 
     toggleControlState(true);
     
@@ -1306,12 +1425,12 @@ async function startSimulate(compareMode = false) {
     const startTime = performance.now();
 
     // Generate hybrid population
-    writeLog(`Membuat populasi Hybrid (Greedy Ratio: ${greedyRatio * 100}%)...`);
+    writeLog(`Membuat populasi Hybrid (Greedy Ratio: ${greedyRatio * 100}%)...`, "system");
     let populationHybrid = initializePopulation(popSize, sessions, rooms, timeSlots, greedyRatio);
     
     // Capture a raw random chromosome to represent the initial unoptimized state (before optimization) for adjustment comparison
     const rawRandomChrom = createRandomChromosome(sessions, rooms, timeSlots);
-    window.initialBestIndividual = {
+    globalScope.initialBestIndividual = {
         chromosome: rawRandomChrom,
         evaluation: evaluateChromosome(rawRandomChrom, sessions)
     };
@@ -1329,9 +1448,20 @@ async function startSimulate(compareMode = false) {
     // Generate pure GA population if compareMode
     let populationPure = null;
     if (compareMode) {
-        writeLog(`Membuat populasi Pure GA (Greedy Ratio: 0%)...`);
+        writeLog(`Membuat populasi Pure GA (Greedy Ratio: 0%)...`, "system");
         populationPure = initializePopulation(popSize, sessions, rooms, timeSlots, 0.0);
     }
+
+    // Record Gen 0: initial population fitness (chart always has a starting point)
+    const initialBest = populationHybrid[0];
+    chart.data.labels.push("Gen 0");
+    chart.data.datasets[0].data.push(initialBest.evaluation.fitness);
+    if (compareMode && populationPure) {
+        chart.data.datasets[1].data.push(populationPure[0].evaluation.fitness);
+    }
+    updateStatsUI(0, initialBest.evaluation.fitness, initialBest.evaluation.totalConflicts, 0);
+    writeLog(`Gen 0: Best Hybrid Fitness = ${initialBest.evaluation.fitness.toFixed(4)} (${initialBest.evaluation.totalConflicts} Bentrokan)${compareMode && populationPure ? ` | Best Pure Fitness = ${populationPure[0].evaluation.fitness.toFixed(4)}` : ""}`, "system");
+    chart.update();
     
     await new Promise(r => setTimeout(r, 600));
     setStep(2, 'completed');
@@ -1350,10 +1480,17 @@ async function startSimulate(compareMode = false) {
 
         currentGen++;
 
+        let hybridConverged = false;
+        let pureConverged = false;
+
         // 1. Evolve Hybrid population
         if (!hybridDone) {
             populationHybrid = evolveGeneration(populationHybrid, popSize, sessions, rooms, timeSlots, cr, mr);
-            if (populationHybrid[0].evaluation.fitness >= 1.0 || currentGen >= maxGen) {
+            if (populationHybrid[0].evaluation.fitness >= 1.0) {
+                hybridDone = true;
+                hybridConverged = true;
+                writeLog(`Hybrid konvergen optimal (fitness 1.0, 0 bentrok) di Gen ${currentGen} — grafik menampilkan Gen 0 s/d Gen ${currentGen}.`, "success");
+            } else if (currentGen >= maxGen) {
                 hybridDone = true;
             }
         }
@@ -1361,7 +1498,11 @@ async function startSimulate(compareMode = false) {
         // 2. Evolve Pure GA population
         if (compareMode && !pureDone) {
             populationPure = evolveGeneration(populationPure, popSize, sessions, rooms, timeSlots, cr, mr);
-            if (populationPure[0].evaluation.fitness >= 1.0 || currentGen >= maxGen) {
+            if (populationPure[0].evaluation.fitness >= 1.0) {
+                pureDone = true;
+                pureConverged = true;
+                writeLog(`Pure GA konvergen optimal (fitness 1.0) di Gen ${currentGen}.`, "warning");
+            } else if (currentGen >= maxGen) {
                 pureDone = true;
             }
         }
@@ -1375,34 +1516,42 @@ async function startSimulate(compareMode = false) {
         // Update Stats UI (Based on Hybrid GA)
         updateStatsUI(currentGen, bestHybrid.evaluation.fitness, bestHybrid.evaluation.totalConflicts, duration);
 
-        // Add generation points to Chart.js
+        // Add generation points to Chart.js (always record; visual update throttled)
         chart.data.labels.push(`Gen ${currentGen}`);
         chart.data.datasets[0].data.push(bestHybrid.evaluation.fitness);
         if (compareMode) {
             chart.data.datasets[1].data.push(bestPure.evaluation.fitness);
-        }
-        
-        // Update Chart smoothly
-        chart.update();
-
-        // Dynamically render schedule matrix and list on the fly for interactive feedback
-        renderScheduleMatrix(bestHybrid.chromosome, sessions, rooms, timeSlots, bestHybrid.evaluation.geneFlags);
-        renderConflicts(bestHybrid.evaluation);
-        renderResultTable(bestHybrid.chromosome, sessions, bestHybrid.evaluation.geneFlags);
-
-        // Log logs periodically or on special events
-        if (currentGen % 10 === 0 || currentGen === 1 || hybridDone || (compareMode && pureDone)) {
-            let logMsg = `Gen ${currentGen}: Best Hybrid Fitness = ${bestHybrid.evaluation.fitness.toFixed(4)}`;
-            if (compareMode) {
-                logMsg += ` | Best Pure Fitness = ${bestPure.evaluation.fitness.toFixed(4)}`;
-            }
-            writeLog(logMsg);
         }
 
         // Check if finished
         const isSimulationFinished = compareMode 
             ? (hybridDone && pureDone) || currentGen >= maxGen
             : hybridDone || currentGen >= maxGen;
+
+        // Throttle heavy re-renders (matrix/list/chart paint) every N generations
+        const shouldPaint = currentGen % RENDER_EVERY_N_GENS === 0
+            || currentGen === 1
+            || hybridConverged
+            || pureConverged
+            || isSimulationFinished;
+
+        if (shouldPaint) {
+            chart.update();
+
+            // Dynamically render schedule matrix and list on the fly for interactive feedback
+            renderScheduleMatrix(bestHybrid.chromosome, sessions, rooms, timeSlots, bestHybrid.evaluation.geneFlags);
+            renderConflicts(bestHybrid.evaluation);
+            renderResultTable(bestHybrid.chromosome, sessions, bestHybrid.evaluation.geneFlags);
+        }
+
+        // Log logs periodically or on special events
+        if (currentGen % 10 === 0 || currentGen === 1 || hybridConverged || pureConverged || isSimulationFinished) {
+            let logMsg = `Gen ${currentGen}: Best Hybrid Fitness = ${bestHybrid.evaluation.fitness.toFixed(4)}`;
+            if (compareMode) {
+                logMsg += ` | Best Pure Fitness = ${bestPure.evaluation.fitness.toFixed(4)}`;
+            }
+            writeLog(logMsg);
+        }
 
         if (isSimulationFinished) {
             finishSimulation(currentGen, populationHybrid[0], duration, compareMode, populationPure ? populationPure[0] : null, sessions);
@@ -1430,7 +1579,7 @@ function finishSimulation(finalGen, bestHybrid, duration, compareMode, bestPure,
     writeLog(`Fitness Akhir Hybrid: ${bestHybrid.evaluation.fitness.toFixed(5)} (${bestHybrid.evaluation.totalConflicts} Bentrokan)`, "success");
     
     // Draw the final system schedule adjustment table comparison (Conflicted Initial vs Perfect Final)
-    renderAdjustmentTable(window.initialBestIndividual, bestHybrid, sessions);
+    renderAdjustmentTable(globalScope.initialBestIndividual, bestHybrid, sessions);
 
     if (compareMode && bestPure) {
         writeLog(`Fitness Akhir Pure GA: ${bestPure.evaluation.fitness.toFixed(5)} (${bestPure.evaluation.totalConflicts} Bentrokan)`, "warning");
@@ -1442,9 +1591,30 @@ function finishSimulation(finalGen, bestHybrid, duration, compareMode, bestPure,
     }
 
     const statusBadge = document.getElementById("badgeStatus");
-    statusBadge.className = "badge-custom bg-success text-dark border-success";
-    statusBadge.style.backgroundColor = "var(--color-success)";
-    statusBadge.style.color = "var(--text-dark)";
-    statusBadge.style.borderColor = "var(--color-success)";
-    statusBadge.innerText = "Done";
+    if (statusBadge) {
+        statusBadge.className = "badge-custom bg-success text-dark border-success";
+        statusBadge.style.backgroundColor = "var(--color-success)";
+        statusBadge.style.color = "var(--text-dark)";
+        statusBadge.style.borderColor = "var(--color-success)";
+        statusBadge.innerText = "Done";
+    }
+}
+
+// Export pure helpers for Node unit tests (browser ignores this)
+if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+        escapeHtml,
+        clampNumber,
+        parseListFromText,
+        shuffleArray,
+        cloneChromosome,
+        evaluateChromosome,
+        createRandomChromosome,
+        createGreedyChromosome,
+        initializePopulation,
+        evolveGeneration,
+        crossover,
+        mutate,
+        tournamentSelection
+    };
 }
